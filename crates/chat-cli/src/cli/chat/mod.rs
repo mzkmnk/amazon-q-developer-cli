@@ -5,6 +5,7 @@ mod conversation;
 mod input_source;
 mod message;
 mod parse;
+pub mod stream_json;
 use std::path::MAIN_SEPARATOR;
 pub mod checkpoint;
 mod line_tracker;
@@ -206,6 +207,20 @@ pub enum WrapMode {
     Auto,
 }
 
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+pub enum OutputFormat {
+    /// Plain text output with markdown rendering (default)
+    Plain,
+    /// JSON output (newline-delimited JSON events)
+    Json,
+}
+
+impl Default for OutputFormat {
+    fn default() -> Self {
+        Self::Plain
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default, Args)]
 pub struct ChatArgs {
     /// Resumes the previous conversation from this directory.
@@ -232,13 +247,19 @@ pub struct ChatArgs {
     /// Control line wrapping behavior (default: auto-detect)
     #[arg(short = 'w', long, value_enum)]
     pub wrap: Option<WrapMode>,
+
+    /// Output format (default: plain)
+    #[arg(short = 'f', long = "output-format", value_enum)]
+    pub output_format: Option<OutputFormat>,
 }
 
 impl ChatArgs {
     pub async fn execute(mut self, os: &mut Os) -> Result<ExitCode> {
         let mut input = self.input;
+        let output_format = self.output_format.unwrap_or_default();
+        let is_non_interactive = self.no_interactive || output_format == OutputFormat::Json;
 
-        if self.no_interactive && input.is_none() {
+        if is_non_interactive && input.is_none() {
             if !std::io::stdin().is_terminal() {
                 let mut buffer = String::new();
                 match std::io::stdin().read_to_string(&mut buffer) {
@@ -419,6 +440,8 @@ impl ChatArgs {
             .await?;
         let tool_config = tool_manager.load_tools(os, &mut stderr).await?;
 
+        let interactive = !is_non_interactive;
+
         ChatSession::new(
             os,
             stdout,
@@ -432,9 +455,10 @@ impl ChatArgs {
             tool_manager,
             model_id,
             tool_config,
-            !self.no_interactive,
+            interactive,
             mcp_enabled,
             self.wrap,
+            output_format,
         )
         .await?
         .spawn(os)
@@ -597,6 +621,7 @@ pub struct ChatSession {
     inner: Option<ChatState>,
     ctrlc_rx: broadcast::Receiver<()>,
     wrap: Option<WrapMode>,
+    output_format: OutputFormat,
 }
 
 impl ChatSession {
@@ -617,6 +642,7 @@ impl ChatSession {
         interactive: bool,
         mcp_enabled: bool,
         wrap: Option<WrapMode>,
+        output_format: OutputFormat,
     ) -> Result<Self> {
         // Reload prior conversation
         let mut existing_conversation = false;
@@ -709,6 +735,7 @@ impl ChatSession {
             inner: Some(ChatState::default()),
             ctrlc_rx,
             wrap,
+            output_format,
         })
     }
 
@@ -796,6 +823,19 @@ impl ChatSession {
 
         // We encountered an error. Handle it.
         error!(?err, "An error occurred processing the current state");
+        
+        if self.output_format == OutputFormat::Json {
+            use crate::cli::chat::stream_json::{StreamEvent, ResultEvent, ResultSubtype};
+            let event = StreamEvent::Result(ResultEvent {
+                subtype: ResultSubtype::Error,
+                duration_ms: None,
+                total_cost_usd: None,
+                usage: None,
+                error: Some(format!("{:?}", err)),
+            });
+            let _ = stream_json::emit_event(&event);
+        }
+        
         let (reason, reason_desc) = get_error_reason(&err);
         self.send_error_telemetry(os, reason, Some(reason_desc), err.status_code())
             .await;
@@ -1189,13 +1229,22 @@ impl ChatSession {
     }
 
     async fn spawn(&mut self, os: &mut Os) -> Result<()> {
-        let is_small_screen = self.terminal_width() < GREETING_BREAK_POINT;
-        if os
-            .database
-            .settings
-            .get_bool(Setting::ChatGreetingEnabled)
-            .unwrap_or(true)
-        {
+        if self.output_format == OutputFormat::Json {
+            use crate::cli::chat::stream_json::{StreamEvent, SystemEvent};
+            let event = StreamEvent::System(SystemEvent {
+                subtype: "init".to_string(),
+                session_id: Some(self.conversation.conversation_id().to_string()),
+                model: self.conversation.model_info.as_ref().map(|m| m.model_id.clone()),
+            });
+            stream_json::emit_event(&event).ok();
+        } else {
+            let is_small_screen = self.terminal_width() < GREETING_BREAK_POINT;
+            if os
+                .database
+                .settings
+                .get_bool(Setting::ChatGreetingEnabled)
+                .unwrap_or(true)
+            {
             let welcome_text = match self.existing_conversation {
                 true => RESUME_TEXT,
                 false => match is_small_screen {
@@ -1246,6 +1295,7 @@ impl ChatSession {
         self.show_changelog_announcement(os).await?;
 
         if self.all_tools_trusted() {
+            let is_small_screen = self.terminal_width() < GREETING_BREAK_POINT;
             queue!(
                 self.stderr,
                 style::Print(format!(
@@ -1255,24 +1305,26 @@ impl ChatSession {
                 ))
             )?;
         }
-
+        }
         if let Some(agent) = self.conversation.agents.get_active() {
             agent.print_overridden_permissions(&mut self.stderr)?;
         }
 
         self.stderr.flush()?;
 
-        if let Some(ref model_info) = self.conversation.model_info {
-            let (models, _default_model) = get_available_models(os).await?;
-            if let Some(model_option) = models.iter().find(|option| option.model_id == model_info.model_id) {
-                let display_name = model_option.model_name.as_deref().unwrap_or(&model_option.model_id);
-                execute!(
-                    self.stderr,
-                    style::SetForegroundColor(Color::Cyan),
-                    style::Print(format!("🤖 You are chatting with {}\n", display_name)),
-                    style::SetForegroundColor(Color::Reset),
-                    style::Print("\n")
-                )?;
+        if self.output_format == OutputFormat::Plain {
+            if let Some(ref model_info) = self.conversation.model_info {
+                let (models, _default_model) = get_available_models(os).await?;
+                if let Some(model_option) = models.iter().find(|option| option.model_id == model_info.model_id) {
+                    let display_name = model_option.model_name.as_deref().unwrap_or(&model_option.model_id);
+                    execute!(
+                        self.stderr,
+                        style::SetForegroundColor(Color::Cyan),
+                        style::Print(format!("🤖 You are chatting with {}\n", display_name)),
+                        style::SetForegroundColor(Color::Reset),
+                        style::Print("\n")
+                    )?;
+                }
             }
         }
 
@@ -1916,6 +1968,14 @@ impl ChatSession {
         user_input = sanitize_unicode_tags(&user_input);
         let input = user_input.trim();
 
+        if self.output_format == OutputFormat::Json {
+            use crate::cli::chat::stream_json::{StreamEvent, UserEvent};
+            let event = StreamEvent::User(UserEvent {
+                content: input.to_string(),
+            });
+            stream_json::emit_event(&event).ok();
+        }
+
         // handle image path
         if let Some(chat_state) = does_input_reference_file(input) {
             return Ok(chat_state);
@@ -2146,7 +2206,7 @@ impl ChatSession {
             queue!(self.stderr, style::SetForegroundColor(Color::Reset))?;
             queue!(self.stderr, cursor::Hide)?;
 
-            if self.interactive {
+            if self.interactive && self.output_format == OutputFormat::Plain {
                 self.spinner = Some(Spinner::new(Spinners::Dots, "Thinking...".to_owned()));
             }
 
@@ -2170,6 +2230,9 @@ impl ChatSession {
         {
             self.conversation.enter_tangent_mode();
         }
+
+        // Cache UI display flag to avoid borrow checker issues
+        let show_ui = self.should_show_ui();
 
         // Verify tools have permissions.
         for i in 0..self.tool_uses.len() {
@@ -2201,18 +2264,20 @@ impl ChatSession {
                     acc
                 });
 
-                execute!(
-                    self.stderr,
-                    style::SetForegroundColor(Color::Red),
-                    style::Print("Command "),
-                    style::SetForegroundColor(Color::Yellow),
-                    style::Print(&tool.name),
-                    style::SetForegroundColor(Color::Red),
-                    style::Print(" is rejected because it matches one or more rules on the denied list:"),
-                    style::Print(formatted_set),
-                    style::Print("\n"),
-                    style::SetForegroundColor(Color::Reset),
-                )?;
+                if show_ui {
+                    execute!(
+                        self.stderr,
+                        style::SetForegroundColor(Color::Red),
+                        style::Print("Command "),
+                        style::SetForegroundColor(Color::Yellow),
+                        style::Print(&tool.name),
+                        style::SetForegroundColor(Color::Red),
+                        style::Print(" is rejected because it matches one or more rules on the denied list:"),
+                        style::Print(formatted_set),
+                        style::Print("\n"),
+                        style::SetForegroundColor(Color::Reset),
+                    )?;
+                }
 
                 return Ok(ChatState::HandleInput {
                     input: format!(
@@ -2233,7 +2298,9 @@ impl ChatSession {
 
             // TODO: Control flow is hacky here because of borrow rules
             let _ = tool;
-            self.print_tool_description(os, i, allowed).await?;
+            if show_ui {
+                self.print_tool_description(os, i, allowed).await?;
+            }
             let tool = &mut self.tool_uses[i];
 
             if allowed {
@@ -2285,15 +2352,17 @@ impl ChatSession {
                 )
                 .await;
 
-            if self.spinner.is_some() {
-                queue!(
-                    self.stderr,
-                    terminal::Clear(terminal::ClearType::CurrentLine),
-                    cursor::MoveToColumn(0),
-                    cursor::Show
-                )?;
+            if show_ui {
+                if self.spinner.is_some() {
+                    queue!(
+                        self.stderr,
+                        terminal::Clear(terminal::ClearType::CurrentLine),
+                        cursor::MoveToColumn(0),
+                        cursor::Show
+                    )?;
+                }
+                execute!(self.stdout, style::Print("\n"))?;
             }
-            execute!(self.stdout, style::Print("\n"))?;
 
             // Handle checkpoint after tool execution - store tag for later display
             let checkpoint_tag: Option<String> = {
@@ -2410,26 +2479,28 @@ impl ChatSession {
                     }
 
                     debug!("tool result output: {:#?}", result);
-                    execute!(
-                        self.stdout,
-                        style::Print(CONTINUATION_LINE),
-                        style::Print("\n"),
-                        style::SetForegroundColor(Color::Green),
-                        style::SetAttribute(Attribute::Bold),
-                        style::Print(format!(" ● Completed in {}s", tool_time)),
-                        style::SetForegroundColor(Color::Reset),
-                    )?;
-                    if let Some(tag) = checkpoint_tag {
+                    if show_ui {
                         execute!(
                             self.stdout,
-                            style::SetForegroundColor(Color::Blue),
+                            style::Print(CONTINUATION_LINE),
+                            style::Print("\n"),
+                            style::SetForegroundColor(Color::Green),
                             style::SetAttribute(Attribute::Bold),
-                            style::Print(format!(" [{tag}]")),
+                            style::Print(format!(" ● Completed in {}s", tool_time)),
                             style::SetForegroundColor(Color::Reset),
-                            style::SetAttribute(Attribute::Reset),
                         )?;
+                        if let Some(tag) = checkpoint_tag {
+                            execute!(
+                                self.stdout,
+                                style::SetForegroundColor(Color::Blue),
+                                style::SetAttribute(Attribute::Bold),
+                                style::Print(format!(" [{tag}]")),
+                                style::SetForegroundColor(Color::Reset),
+                                style::SetAttribute(Attribute::Reset),
+                            )?;
+                        }
+                        execute!(self.stdout, style::Print("\n\n"))?;
                     }
-                    execute!(self.stdout, style::Print("\n\n"))?;
 
                     tool_telemetry = tool_telemetry.and_modify(|ev| ev.is_success = Some(true));
                     if let Tool::Custom(_) = &tool.tool {
@@ -2471,19 +2542,21 @@ impl ChatSession {
                 },
                 Err(err) => {
                     error!(?err, "An error occurred processing the tool");
-                    execute!(
-                        self.stderr,
-                        style::Print(CONTINUATION_LINE),
-                        style::Print("\n"),
-                        style::SetAttribute(Attribute::Bold),
-                        style::SetForegroundColor(Color::Red),
-                        style::Print(format!(" ● Execution failed after {}s:\n", tool_time)),
-                        style::SetAttribute(Attribute::Reset),
-                        style::SetForegroundColor(Color::Red),
-                        style::Print(&err),
-                        style::SetAttribute(Attribute::Reset),
-                        style::Print("\n\n"),
-                    )?;
+                    if show_ui {
+                        execute!(
+                            self.stderr,
+                            style::Print(CONTINUATION_LINE),
+                            style::Print("\n"),
+                            style::SetAttribute(Attribute::Bold),
+                            style::SetForegroundColor(Color::Red),
+                            style::Print(format!(" ● Execution failed after {}s:\n", tool_time)),
+                            style::SetAttribute(Attribute::Reset),
+                            style::SetForegroundColor(Color::Red),
+                            style::Print(&err),
+                            style::SetAttribute(Attribute::Reset),
+                            style::Print("\n\n"),
+                        )?;
+                    }
 
                     tool_telemetry.and_modify(|ev| {
                         ev.is_success = Some(false);
@@ -2505,6 +2578,31 @@ impl ChatSession {
                         );
                     }
                 },
+            }
+        }
+
+        if self.output_format == OutputFormat::Json {
+            use crate::cli::chat::stream_json::{StreamEvent, ToolResultEvent};
+            for result in &tool_results {
+                let content = result
+                    .content
+                    .iter()
+                    .map(|block| match block {
+                        ToolUseResultBlock::Text(text) => text.clone(),
+                        ToolUseResultBlock::Json(json) => json.to_string(),
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                
+                let event = StreamEvent::ToolResult(ToolResultEvent {
+                    tool_use_id: result.tool_use_id.clone(),
+                    content,
+                    status: Some(match result.status {
+                        ToolResultStatus::Success => "success".to_string(),
+                        ToolResultStatus::Error => "error".to_string(),
+                    }),
+                });
+                stream_json::emit_event(&event).ok();
             }
         }
 
@@ -2567,7 +2665,7 @@ impl ChatSession {
 
         execute!(self.stderr, cursor::Hide)?;
         execute!(self.stderr, style::Print("\n"), style::SetAttribute(Attribute::Reset))?;
-        if self.interactive {
+        if self.interactive && self.output_format == OutputFormat::Plain {
             self.spinner = Some(Spinner::new(Spinners::Dots, "Thinking...".to_string()));
         }
 
@@ -2645,17 +2743,24 @@ impl ChatSession {
                             tool_name_being_recvd = Some(name);
                         },
                         parser::ResponseEvent::AssistantText(text) => {
-                            // Add Q response prefix before the first assistant text.
-                            if !response_prefix_printed && !text.trim().is_empty() {
-                                queue!(
-                                    self.stdout,
-                                    style::SetForegroundColor(Color::Green),
-                                    style::Print("> "),
-                                    style::SetForegroundColor(Color::Reset)
-                                )?;
-                                response_prefix_printed = true;
+                            match self.output_format {
+                                OutputFormat::Plain => {
+                                    // Add Q response prefix before the first assistant text.
+                                    if !response_prefix_printed && !text.trim().is_empty() {
+                                        queue!(
+                                            self.stdout,
+                                            style::SetForegroundColor(Color::Green),
+                                            style::Print("> "),
+                                            style::SetForegroundColor(Color::Reset)
+                                        )?;
+                                        response_prefix_printed = true;
+                                    }
+                                    buf.push_str(&text);
+                                }
+                                OutputFormat::Json => {
+                                    buf.push_str(&text);
+                                }
                             }
-                            buf.push_str(&text);
                         },
                         parser::ResponseEvent::ToolUse(tool_use) => {
                             if self.spinner.is_some() {
@@ -2667,6 +2772,17 @@ impl ChatSession {
                                     cursor::Show
                                 )?;
                             }
+                            
+                            if self.output_format == OutputFormat::Json {
+                                use crate::cli::chat::stream_json::{StreamEvent, ToolUseEvent};
+                                let event = StreamEvent::ToolUse(ToolUseEvent {
+                                    tool_use_id: tool_use.id.clone(),
+                                    name: tool_use.name.clone(),
+                                    input: Some(tool_use.args.clone()),
+                                });
+                                stream_json::emit_event(&event).ok();
+                            }
+                            
                             tool_uses.push(tool_use);
                             tool_name_being_recvd = None;
                         },
@@ -2679,6 +2795,29 @@ impl ChatSession {
                             if message.content() == RESPONSE_TIMEOUT_CONTENT {
                                 error!(?request_id, ?message, "Encountered an unexpected model response");
                             }
+                            
+                            if self.output_format == OutputFormat::Json {
+                                use crate::cli::chat::stream_json::{StreamEvent, AssistantEvent, ResultEvent, ResultSubtype};
+                                
+                                if !buf.is_empty() {
+                                    let event = StreamEvent::Assistant(AssistantEvent {
+                                        content: buf.clone(),
+                                    });
+                                    stream_json::emit_event(&event).ok();
+                                }
+                                
+                                let duration_ms = rm.stream_end_timestamp_ms
+                                    .saturating_sub(rm.request_start_timestamp_ms);
+                                let event = StreamEvent::Result(ResultEvent {
+                                    subtype: ResultSubtype::Success,
+                                    duration_ms: Some(duration_ms),
+                                    total_cost_usd: None,
+                                    usage: None,
+                                    error: None,
+                                });
+                                stream_json::emit_event(&event).ok();
+                            }
+                            
                             self.conversation.push_assistant_message(os, message, Some(rm.clone()));
                             self.user_turn_request_metadata.push(rm);
                             ended = true;
@@ -2694,6 +2833,19 @@ impl ChatSession {
                         .push(recv_error.request_metadata.clone());
                     let (reason, reason_desc) = get_error_reason(&recv_error);
                     let status_code = recv_error.status_code();
+
+                    if self.output_format == OutputFormat::Json {
+                        use crate::cli::chat::stream_json::{StreamEvent, ResultEvent, ResultSubtype};
+                        let error_message = reason_desc.to_string();
+                        let event = StreamEvent::Result(ResultEvent {
+                            subtype: ResultSubtype::Error,
+                            duration_ms: None,
+                            total_cost_usd: None,
+                            usage: None,
+                            error: Some(error_message),
+                        });
+                        let _ = stream_json::emit_event(&event);
+                    }
 
                     match recv_error.source {
                         RecvErrorKind::StreamTimeout { source, duration } => {
@@ -2863,30 +3015,32 @@ impl ChatSession {
             }
 
             // Print the response for normal cases
-            loop {
-                let input = Partial::new(&buf[offset..]);
-                match interpret_markdown(input, &mut self.stdout, &mut state) {
-                    Ok(parsed) => {
-                        offset += parsed.offset_from(&input);
-                        self.stdout.flush()?;
-                        state.newline = state.set_newline;
-                        state.set_newline = false;
-                    },
-                    Err(err) => match err.into_inner() {
-                        Some(err) => return Err(ChatError::Custom(err.to_string().into())),
-                        None => break, // Data was incomplete
-                    },
-                }
+            if self.output_format == OutputFormat::Plain {
+                loop {
+                    let input = Partial::new(&buf[offset..]);
+                    match interpret_markdown(input, &mut self.stdout, &mut state) {
+                        Ok(parsed) => {
+                            offset += parsed.offset_from(&input);
+                            self.stdout.flush()?;
+                            state.newline = state.set_newline;
+                            state.set_newline = false;
+                        },
+                        Err(err) => match err.into_inner() {
+                            Some(err) => return Err(ChatError::Custom(err.to_string().into())),
+                            None => break, // Data was incomplete
+                        },
+                    }
 
-                // TODO: We should buffer output based on how much we have to parse, not as a constant
-                // Do not remove unless you are nabochay :)
-                tokio::time::sleep(Duration::from_millis(8)).await;
+                    // TODO: We should buffer output based on how much we have to parse, not as a constant
+                    // Do not remove unless you are nabochay :)
+                    tokio::time::sleep(Duration::from_millis(8)).await;
+                }
             }
 
             // Set spinner after showing all of the assistant text content so far.
             if tool_name_being_recvd.is_some() {
                 queue!(self.stderr, cursor::Hide)?;
-                if self.interactive {
+                if self.interactive && self.output_format == OutputFormat::Plain {
                     self.spinner = Some(Spinner::new(Spinners::Dots, "Thinking...".to_string()));
                 }
             }
@@ -3203,7 +3357,7 @@ impl ChatSession {
             Err(err) => return Err(err),
         }
 
-        if self.interactive {
+        if self.interactive && self.output_format == OutputFormat::Plain {
             self.spinner = Some(Spinner::new(Spinners::Dots, "Thinking...".to_owned()));
         }
 
@@ -3236,6 +3390,12 @@ impl ChatSession {
                 tool_permissions: allowed_tools,
             });
         }
+    }
+
+    /// Check if UI elements should be displayed based on output format.
+    /// Returns true for Plain format, false for JSON format.
+    fn should_show_ui(&self) -> bool {
+        self.output_format == OutputFormat::Plain
     }
 
     async fn print_tool_description(&mut self, os: &Os, tool_index: usize, trusted: bool) -> Result<(), ChatError> {
@@ -3743,6 +3903,7 @@ mod tests {
             true,
             false,
             None,
+            OutputFormat::Plain,
         )
         .await
         .unwrap()
@@ -3886,6 +4047,7 @@ mod tests {
             true,
             false,
             None,
+            OutputFormat::Plain,
         )
         .await
         .unwrap()
@@ -3984,6 +4146,7 @@ mod tests {
             true,
             false,
             None,
+            OutputFormat::Plain,
         )
         .await
         .unwrap()
@@ -4060,6 +4223,7 @@ mod tests {
             true,
             false,
             None,
+            OutputFormat::Plain,
         )
         .await
         .unwrap()
@@ -4112,6 +4276,7 @@ mod tests {
             true,
             false,
             None,
+            OutputFormat::Plain,
         )
         .await
         .unwrap()
@@ -4221,6 +4386,7 @@ mod tests {
             true,
             false,
             None,
+            OutputFormat::Plain,
         )
         .await
         .unwrap()
@@ -4353,6 +4519,7 @@ mod tests {
             true,
             false,
             None,
+            OutputFormat::Plain,
         )
         .await
         .unwrap()
@@ -4381,6 +4548,48 @@ mod tests {
             let actual = does_input_reference_file(input).is_some();
             assert_eq!(actual, *expected, "expected {} for input {}", expected, input);
         }
+    }
+
+    #[test]
+    fn test_output_format_default() {
+        let args = ChatArgs::default();
+        assert_eq!(args.output_format, None);
+    }
+
+    #[test]
+    fn test_output_format_plain() {
+        use clap::Parser;
+        #[derive(Parser)]
+        struct TestCli {
+            #[command(flatten)]
+            chat_args: ChatArgs,
+        }
+        let cli = TestCli::parse_from(&["test", "--output-format", "plain"]);
+        assert_eq!(cli.chat_args.output_format, Some(OutputFormat::Plain));
+    }
+
+    #[test]
+    fn test_output_format_json() {
+        use clap::Parser;
+        #[derive(Parser)]
+        struct TestCli {
+            #[command(flatten)]
+            chat_args: ChatArgs,
+        }
+        let cli = TestCli::parse_from(&["test", "--output-format", "json"]);
+        assert_eq!(cli.chat_args.output_format, Some(OutputFormat::Json));
+    }
+
+    #[test]
+    fn test_output_format_short_flag() {
+        use clap::Parser;
+        #[derive(Parser)]
+        struct TestCli {
+            #[command(flatten)]
+            chat_args: ChatArgs,
+        }
+        let cli = TestCli::parse_from(&["test", "-f", "json"]);
+        assert_eq!(cli.chat_args.output_format, Some(OutputFormat::Json));
     }
 }
 

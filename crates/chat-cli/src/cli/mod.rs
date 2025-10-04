@@ -383,6 +383,7 @@ mod test {
                 trust_tools: None,
                 no_interactive: false,
                 wrap: None,
+                output_format: None,
             })),
             verbose: 2,
             help_all: false,
@@ -423,6 +424,7 @@ mod test {
                 trust_tools: None,
                 no_interactive: false,
                 wrap: None,
+                output_format: None,
             })
         );
     }
@@ -440,6 +442,7 @@ mod test {
                 trust_tools: None,
                 no_interactive: false,
                 wrap: None,
+                output_format: None,
             })
         );
     }
@@ -457,6 +460,7 @@ mod test {
                 trust_tools: None,
                 no_interactive: false,
                 wrap: None,
+                output_format: None,
             })
         );
     }
@@ -474,6 +478,7 @@ mod test {
                 trust_tools: None,
                 no_interactive: true,
                 wrap: None,
+                output_format: None,
             })
         );
         assert_parse!(
@@ -487,6 +492,7 @@ mod test {
                 trust_tools: None,
                 no_interactive: true,
                 wrap: None,
+                output_format: None,
             })
         );
     }
@@ -504,6 +510,7 @@ mod test {
                 trust_tools: None,
                 no_interactive: false,
                 wrap: None,
+                output_format: None,
             })
         );
     }
@@ -521,6 +528,7 @@ mod test {
                 trust_tools: Some(vec!["".to_string()]),
                 no_interactive: false,
                 wrap: None,
+                output_format: None,
             })
         );
     }
@@ -538,6 +546,7 @@ mod test {
                 trust_tools: Some(vec!["fs_read".to_string(), "fs_write".to_string()]),
                 no_interactive: false,
                 wrap: None,
+                output_format: None,
             })
         );
     }
@@ -555,6 +564,7 @@ mod test {
                 trust_tools: None,
                 no_interactive: false,
                 wrap: Some(Never),
+                output_format: None,
             })
         );
         assert_parse!(
@@ -568,6 +578,7 @@ mod test {
                 trust_tools: None,
                 no_interactive: false,
                 wrap: Some(Always),
+                output_format: None,
             })
         );
         assert_parse!(
@@ -581,6 +592,7 @@ mod test {
                 trust_tools: None,
                 no_interactive: false,
                 wrap: Some(Auto),
+                output_format: None,
             })
         );
     }
