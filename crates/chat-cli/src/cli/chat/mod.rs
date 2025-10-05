@@ -257,7 +257,7 @@ impl ChatArgs {
     pub async fn execute(mut self, os: &mut Os) -> Result<ExitCode> {
         let mut input = self.input;
         let output_format = self.output_format.unwrap_or_default();
-        let is_non_interactive = self.no_interactive || output_format == OutputFormat::Json;
+        let is_non_interactive = self.no_interactive;
 
         if is_non_interactive && input.is_none() {
             if !std::io::stdin().is_terminal() {
