@@ -2279,6 +2279,34 @@ mod tests {
 
         // Test empty string
         assert_eq!(truncate_description("", 10), "");
+
+        // Edge case: max_length very small (result will be just "...")
+        let result = truncate_description("한국어", 5);
+        assert_eq!(result, "...");
+        
+        let result = truncate_description("ABCDEF", 5);
+        assert_eq!(result, "AB...");
+
+        // Edge case: first CJK character (3 bytes) + "..." = 6 bytes minimum
+        let result = truncate_description("한국어", 6);
+        assert_eq!(result, "한...");
+        assert!(result.len() <= 6);
+
+        // Edge case: emoji (4-byte characters)
+        let emoji = "😀😀😀😀😀";
+        let result = truncate_description(emoji, 15);
+        assert!(result.len() <= 15);
+        assert!(result.ends_with("..."));
+
+        // Edge case: mixed ASCII and CJK
+        let mixed = "Hello世界こんにちは";
+        let result = truncate_description(mixed, 15);
+        assert!(result.len() <= 15);
+        assert!(result.ends_with("..."));
+        
+        // Edge case: single CJK character that fits
+        let result = truncate_description("한", 10);
+        assert_eq!(result, "한");
     }
 
     #[test]
