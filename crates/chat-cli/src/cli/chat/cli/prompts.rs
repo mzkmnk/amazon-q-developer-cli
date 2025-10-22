@@ -262,12 +262,6 @@ fn truncate_description(text: &str, max_length: usize) -> String {
             truncate_at = idx;
         }
         
-        // If we found a valid boundary, use it; otherwise use the last character start
-        if truncate_at == 0 && !text.is_empty() {
-            // Edge case: even the first character is too long
-            truncate_at = text.char_indices().next().map(|(i, _)| i).unwrap_or(0);
-        }
-        
         let truncated = &text[..truncate_at];
         format!("{}...", truncated.trim_end())
     }
