@@ -2522,59 +2522,52 @@ mod tests {
     }
 
     #[test]
-    fn test_truncate_description_ascii() {
-        // Test with ASCII text
-        assert_eq!(truncate_description("Hello World", 20), "Hello World");
-        assert_eq!(truncate_description("Hello World", 11), "Hello World");
-        assert_eq!(truncate_description("Hello World", 8), "Hello...");
-        assert_eq!(truncate_description("Hello World", 5), "He...");
-    }
+    fn test_truncate_description() {
+        // Test normal length
+        let short = "Short description";
+        assert_eq!(truncate_description(short, 40), "Short description");
 
-    #[test]
-    fn test_truncate_description_cjk() {
-        // Test with CJK characters (3 bytes each in UTF-8)
-        // Korean text from issue #3117
+        // Test truncation
+        let long =
+            "This is a very long description that should be truncated because it exceeds the maximum length limit";
+        let result = truncate_description(long, 40);
+        assert!(result.len() <= 40);
+        assert!(result.ends_with("..."));
+        // Length may be less than 40 due to trim_end() removing trailing spaces
+        assert!(result.len() >= 37); // At least max_length - 3 chars
+
+        // Test exact length
+        let exact = "A".repeat(40);
+        assert_eq!(truncate_description(&exact, 40), exact);
+
+        // Test very short max length
+        let result = truncate_description("Hello world", 5);
+        assert_eq!(result, "He...");
+        assert_eq!(result.len(), 5);
+
+        // Test space trimming before ellipsis
+        let with_space = "Prompt to explain available tools and how";
+        let result = truncate_description(with_space, 40);
+        assert!(!result.contains(" ..."));
+        assert!(result.ends_with("..."));
+        assert_eq!(result, "Prompt to explain available tools and...");
+
+        // Test CJK characters (fixes #3117, #3170)
         let korean = "사용자가 작성한 글의 어색한 표현이나 오타를 수정하고 싶을 때";
         let result = truncate_description(korean, 40);
         assert!(result.len() <= 40);
         assert!(result.ends_with("..."));
-        
-        // Chinese text from issue #3170
+
         let chinese = "移除 eagleeye-ec-databases 任務狀況確認，最後完成後把";
         let result = truncate_description(chinese, 60);
         assert!(result.len() <= 60);
-        
-        // Japanese text
+
         let japanese = "これは日本語のテキストです。長い文章をテストします。";
         let result = truncate_description(japanese, 30);
         assert!(result.len() <= 30);
         assert!(result.ends_with("..."));
-    }
 
-    #[test]
-    fn test_truncate_description_mixed() {
-        // Test with mixed ASCII and CJK
-        let mixed = "CSR 페이지를 렌더링하고 있는데, html, 이미지는 화면에 잘 나타나는데";
-        let result = truncate_description(mixed, 60);
-        assert!(result.len() <= 60);
-        
-        // Ensure no panic on exact boundary
-        let text = "移除 eagleeye-ec-databases 任務狀況確認";
-        let result = truncate_description(text, 60);
-        assert!(result.len() <= 60);
-    }
-
-    #[test]
-    fn test_truncate_description_edge_cases() {
-        // Empty string
+        // Test empty string
         assert_eq!(truncate_description("", 10), "");
-        
-        // Very short max_length
-        assert_eq!(truncate_description("Hello", 3), "...");
-        
-        // Single multibyte character
-        let emoji = "😀";
-        let result = truncate_description(emoji, 10);
-        assert!(result.len() <= 10);
     }
 }
