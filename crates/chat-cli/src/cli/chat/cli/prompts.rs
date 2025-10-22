@@ -2236,7 +2236,55 @@ mod tests {
         assert_eq!(format_description(multiline_desc.as_ref()), "First line");
     }
 
+    #[test]
+    fn test_truncate_description() {
+        // Test normal length
+        let short = "Short description";
+        assert_eq!(truncate_description(short, 40), "Short description");
 
+        // Test truncation
+        let long =
+            "This is a very long description that should be truncated because it exceeds the maximum length limit";
+        let result = truncate_description(long, 40);
+        assert!(result.len() <= 40);
+        assert!(result.ends_with("..."));
+        // Length may be less than 40 due to trim_end() removing trailing spaces
+        assert!(result.len() >= 37); // At least max_length - 3 chars
+
+        // Test exact length
+        let exact = "A".repeat(40);
+        assert_eq!(truncate_description(&exact, 40), exact);
+
+        // Test very short max length
+        let result = truncate_description("Hello world", 5);
+        assert_eq!(result, "He...");
+        assert_eq!(result.len(), 5);
+
+        // Test space trimming before ellipsis
+        let with_space = "Prompt to explain available tools and how";
+        let result = truncate_description(with_space, 40);
+        assert!(!result.contains(" ..."));
+        assert!(result.ends_with("..."));
+        assert_eq!(result, "Prompt to explain available tools and...");
+
+        // Test CJK characters (fixes #3117, #3170)
+        let korean = "사용자가 작성한 글의 어색한 표현이나 오타를 수정하고 싶을 때";
+        let result = truncate_description(korean, 40);
+        assert!(result.len() <= 40);
+        assert!(result.ends_with("..."));
+
+        let chinese = "移除 eagleeye-ec-databases 任務狀況確認，最後完成後把";
+        let result = truncate_description(chinese, 60);
+        assert!(result.len() <= 60);
+
+        let japanese = "これは日本語のテキストです。長い文章をテストします。";
+        let result = truncate_description(japanese, 30);
+        assert!(result.len() <= 30);
+        assert!(result.ends_with("..."));
+
+        // Test empty string
+        assert_eq!(truncate_description("", 10), "");
+    }
 
     #[test]
     fn test_parse_all_mcp_error_details() {
@@ -2524,55 +2572,5 @@ mod tests {
             unqualified_name
         };
         assert_eq!(actual_prompt_name, "my_prompt");
-    }
-
-    #[test]
-    fn test_truncate_description() {
-        // Test normal length
-        let short = "Short description";
-        assert_eq!(truncate_description(short, 40), "Short description");
-
-        // Test truncation
-        let long =
-            "This is a very long description that should be truncated because it exceeds the maximum length limit";
-        let result = truncate_description(long, 40);
-        assert!(result.len() <= 40);
-        assert!(result.ends_with("..."));
-        // Length may be less than 40 due to trim_end() removing trailing spaces
-        assert!(result.len() >= 37); // At least max_length - 3 chars
-
-        // Test exact length
-        let exact = "A".repeat(40);
-        assert_eq!(truncate_description(&exact, 40), exact);
-
-        // Test very short max length
-        let result = truncate_description("Hello world", 5);
-        assert_eq!(result, "He...");
-        assert_eq!(result.len(), 5);
-
-        // Test space trimming before ellipsis
-        let with_space = "Prompt to explain available tools and how";
-        let result = truncate_description(with_space, 40);
-        assert!(!result.contains(" ..."));
-        assert!(result.ends_with("..."));
-        assert_eq!(result, "Prompt to explain available tools and...");
-
-        // Test CJK characters (fixes #3117, #3170)
-        let korean = "사용자가 작성한 글의 어색한 표현이나 오타를 수정하고 싶을 때";
-        let result = truncate_description(korean, 40);
-        assert!(result.len() <= 40);
-        assert!(result.ends_with("..."));
-
-        let chinese = "移除 eagleeye-ec-databases 任務狀況確認，最後完成後把";
-        let result = truncate_description(chinese, 60);
-        assert!(result.len() <= 60);
-
-        let japanese = "これは日本語のテキストです。長い文章をテストします。";
-        let result = truncate_description(japanese, 30);
-        assert!(result.len() <= 30);
-        assert!(result.ends_with("..."));
-
-        // Test empty string
-        assert_eq!(truncate_description("", 10), "");
     }
 }
