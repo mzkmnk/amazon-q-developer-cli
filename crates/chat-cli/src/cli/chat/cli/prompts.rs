@@ -33,6 +33,7 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::cli::chat::cli::editor::open_editor_file;
 use crate::cli::chat::tool_manager::PromptBundle;
+use crate::cli::chat::util::truncate_safe_in_place;
 use crate::cli::chat::{
     ChatError,
     ChatSession,
@@ -248,23 +249,11 @@ fn format_description(description: Option<&String>) -> String {
 /// to ensure clean formatting. This function is UTF-8 safe and will not panic
 /// on multibyte characters (e.g., CJK languages).
 fn truncate_description(text: &str, max_length: usize) -> String {
-    if text.len() <= max_length {
-        text.to_string()
-    } else {
-        // UTF-8 safe truncation: find the last valid character boundary
-        let target_len = max_length.saturating_sub(3);
-        let mut truncate_at = 0;
-        
-        for (idx, _) in text.char_indices() {
-            if idx > target_len {
-                break;
-            }
-            truncate_at = idx;
-        }
-        
-        let truncated = &text[..truncate_at];
-        format!("{}...", truncated.trim_end())
-    }
+    let mut result = text.to_string();
+
+    truncate_safe_in_place(&mut result, max_length, "...");
+
+    result
 }
 
 /// Represents parsed MCP error details for generating user-friendly messages.
@@ -2282,7 +2271,7 @@ mod tests {
         // Edge case: max_length very small (result will be just "...")
         let result = truncate_description("한국어", 5);
         assert_eq!(result, "...");
-        
+
         let result = truncate_description("ABCDEF", 5);
         assert_eq!(result, "AB...");
 
@@ -2302,7 +2291,7 @@ mod tests {
         let result = truncate_description(mixed, 15);
         assert!(result.len() <= 15);
         assert!(result.ends_with("..."));
-        
+
         // Edge case: single CJK character that fits
         let result = truncate_description("한", 10);
         assert_eq!(result, "한");
