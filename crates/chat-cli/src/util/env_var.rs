@@ -51,6 +51,10 @@ pub fn in_ci() -> bool {
     env.get_os(CI).is_some() || env.get_os(Q_CI).is_some()
 }
 
+pub fn is_integ_test() -> bool {
+    std::env::var_os(CLI_IS_INTEG_TEST).is_some_and(|s| !s.is_empty())
+}
+
 /// Get CLI client application
 pub fn get_cli_client_application() -> Option<String> {
     Env::new().get(Q_CLI_CLIENT_APPLICATION).ok()

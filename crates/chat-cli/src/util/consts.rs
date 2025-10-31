@@ -69,6 +69,9 @@ pub mod env_var {
         /// Identifier for the client application or service using the chat-cli
         Q_CLI_CLIENT_APPLICATION = "Q_CLI_CLIENT_APPLICATION",
 
+        /// Flag for running integration tests
+        CLI_IS_INTEG_TEST = "Q_CLI_IS_INTEG_TEST",
+
         /// Enable logging to stdout
         Q_LOG_STDOUT = "Q_LOG_STDOUT",
 
